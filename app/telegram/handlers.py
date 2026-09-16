@@ -7,7 +7,7 @@ from aiogram.types import Message
 from app.config import Settings
 from app.repositories.message_repository import Storage
 from app.services.translation import TranslationService
-from app.telegram.content_filter import should_translate
+from app.telegram.content_filter import message_text, should_translate
 from app.telegram.content_translation import translate_message_content
 from app.telegram.formatting import build_translation_messages
 from app.telegram.helpers import message_is_allowed, sync_translation_messages
@@ -21,7 +21,7 @@ async def get_chat_id(message: Message) -> None:
     await message.reply(f"Chat ID:\n{message.chat.id}")
 
 
-@router.message(F.text)
+@router.message(F.text | F.caption)
 async def handle_new_message(
     message: Message,
     bot: Bot,
@@ -31,13 +31,13 @@ async def handle_new_message(
 ) -> None:
     if not message_is_allowed(message, settings):
         return
-    if message.text.startswith("/"):
+    text = message_text(message).strip()
+    if text.startswith("/"):
         return
     if message.from_user and message.from_user.is_bot:
         return
     if not should_translate(message):
         return
-    text = message.text.strip()
     if not text:
         return
     user_id = message.from_user.id if message.from_user else None
@@ -99,7 +99,7 @@ async def handle_new_message(
         logger.exception("Failed to translate message %s", message.message_id)
 
 
-@router.edited_message(F.text)
+@router.edited_message(F.text | F.caption)
 async def handle_edited_message(
     message: Message,
     bot: Bot,
@@ -113,7 +113,7 @@ async def handle_edited_message(
         return
     if not should_translate(message):
         return
-    text = message.text.strip()
+    text = message_text(message).strip()
     if not text:
         return
     link, changed = await storage.update_source_text(

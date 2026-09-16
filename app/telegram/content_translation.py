@@ -2,10 +2,7 @@ from aiogram.types import Message
 
 from app.languages import TARGET_LANGUAGES
 from app.services.translation import TranslationService
-from app.telegram.content_filter import split_content
-
-
-CODE_PLACEHOLDER = "⌨️ [CODE]"
+from app.telegram.content_filter import message_text, split_content
 
 
 def _surrounding_whitespace(text: str) -> tuple[str, str]:
@@ -21,9 +18,14 @@ async def translate_message_content(
 ) -> dict[str, str]:
     """Переводит обычный текст, сохраняя фрагменты кода без изменений."""
     content_message = message
-    if text is not None and text != message.text:
+    if text is not None and text != message_text(message):
         content_message = message.model_copy(
-            update={"text": text, "entities": []}
+            update={
+                "text": text,
+                "caption": None,
+                "entities": [],
+                "caption_entities": [],
+            }
         )
 
     translations = {
@@ -43,7 +45,7 @@ async def translate_message_content(
             for language in translations:
                 translations[language] += (
                     leading_space
-                    + CODE_PLACEHOLDER
+                    + (part.placeholder or "[CONTENT]")
                     + trailing_space
                 )
             continue

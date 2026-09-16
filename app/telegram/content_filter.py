@@ -6,15 +6,11 @@ from aiogram.enums import MessageEntityType
 from aiogram.types import Message
 
 
-CODE_ENTITY_TYPES = {
-    MessageEntityType.CODE,
-    MessageEntityType.PRE,
-}
+CODE_PLACEHOLDER = "[CODE]"
+EMOJI_PLACEHOLDER = "[EMOJI]"
 
-LINK_ENTITY_TYPES = {
-    MessageEntityType.URL,
-    MessageEntityType.TEXT_LINK,
-}
+CODE_ENTITY_TYPES = {MessageEntityType.CODE, MessageEntityType.PRE}
+LINK_ENTITY_TYPES = {MessageEntityType.URL, MessageEntityType.TEXT_LINK}
 
 STANDALONE_URL_PATTERN = re.compile(
     r"^(?:(?:https?://|tg://|www\.)\S+|"
@@ -24,20 +20,26 @@ STANDALONE_URL_PATTERN = re.compile(
 )
 
 CODE_LINE_PATTERN = re.compile(
-    r"^\s*(?:"
-    r"from\s+\S+\s+import\s+|"
-    r"import\s+\S+|"
-    r"(?:async\s+)?def\s+\w+\s*\(|"
-    r"class\s+\w+|"
-    r"(?:const|let|var)\s+\w+\s*=|"
-    r"function\s+\w*\s*\(|"
+    r"^\s*(?:from\s+\S+\s+import\s+|import\s+\S+|"
+    r"(?:async\s+)?def\s+\w+\s*\(|class\s+\w+|"
+    r"(?:const|let|var)\s+\w+\s*=|function\s+\w*\s*\(|"
     r"(?:SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP)\b|"
     r"(?:GET|POST|PUT|PATCH|DELETE)\s+/\S+|"
-    r"Traceback \(most recent call last\)|"
-    r"File \".+\", line \d+|"
-    r"<\?xml\b|<!DOCTYPE\s+html\b|<html\b"
-    r")",
+    r"Traceback \(most recent call last\)|File \".+\", line \d+|"
+    r"<\?xml\b|<!DOCTYPE\s+html\b|<html\b)",
     flags=re.IGNORECASE | re.MULTILINE,
+)
+
+EMOJI_PATTERN = re.compile(
+    r"(?:"
+    r"[\U0001F1E6-\U0001F1FF]{2}|"
+    r"[0-9#*]\ufe0f?\u20e3|"
+    r"[\U0001F300-\U0001FAFF\u2600-\u27BF]"
+    r"(?:\ufe0f|\ufe0e)?"
+    r"[\U0001F3FB-\U0001F3FF]?"
+    r"(?:\u200d[\U0001F300-\U0001FAFF\u2600-\u27BF]"
+    r"(?:\ufe0f|\ufe0e)?[\U0001F3FB-\U0001F3FF]?)*"
+    r")+"
 )
 
 
@@ -45,48 +47,65 @@ CODE_LINE_PATTERN = re.compile(
 class ContentPart:
     text: str
     translatable: bool
+    placeholder: str | None = None
+
+
+def message_text(message: Message) -> str:
+    return getattr(message, "text", None) or getattr(message, "caption", None) or ""
+
+
+def message_entities(message: Message) -> list:
+    return list(
+        getattr(message, "entities", None)
+        or getattr(message, "caption_entities", None)
+        or []
+    )
+
+
+def media_placeholder(message: Message) -> str | None:
+    if getattr(message, "photo", None):
+        return "[IMG]"
+    if getattr(message, "sticker", None):
+        return "[STICKER]"
+    if getattr(message, "animation", None):
+        return "[GIF]"
+    if getattr(message, "video", None) or getattr(message, "video_note", None):
+        return "[VIDEO]"
+    if getattr(message, "voice", None):
+        return "[VOICE]"
+    if getattr(message, "audio", None):
+        return "[AUDIO]"
+    if getattr(message, "document", None):
+        return "[FILE]"
+    return None
 
 
 def is_json(text: str) -> bool:
-    """Определяет JSON-объекты и массивы, не считая JSON обычной строкой."""
     try:
         value = json.loads(text)
     except (json.JSONDecodeError, TypeError):
         return False
-
     return isinstance(value, (dict, list))
 
 
-def has_code_entity(message: Message) -> bool:
-    """Проверяет нативную Telegram-разметку `code` и `pre`."""
-    return any(
-        entity.type in CODE_ENTITY_TYPES
-        for entity in (message.entities or [])
-    )
-
-
 def is_standalone_link(message: Message) -> bool:
-    """Определяет сообщение, состоящее только из одной ссылки."""
-    text = message.text or ""
+    text = message_text(message)
     stripped = text.strip()
     if not stripped:
         return False
-
     if STANDALONE_URL_PATTERN.fullmatch(stripped):
         return True
-
     leading_units = len(text[:len(text) - len(text.lstrip())].encode("utf-16-le")) // 2
     stripped_units = len(stripped.encode("utf-16-le")) // 2
     return any(
         entity.type in LINK_ENTITY_TYPES
         and entity.offset == leading_units
         and entity.length == stripped_units
-        for entity in (message.entities or [])
+        for entity in message_entities(message)
     )
 
 
 def _utf16_slice(text: str, start: int, end: int) -> str:
-    """Вырезает текст по UTF-16 offsets, которые использует Telegram."""
     encoded = text.encode("utf-16-le")
     return encoded[start * 2:end * 2].decode("utf-16-le")
 
@@ -96,70 +115,59 @@ def _merge_parts(parts: list[ContentPart]) -> list[ContentPart]:
     for part in parts:
         if not part.text:
             continue
-        if merged and merged[-1].translatable == part.translatable:
+        if (
+            merged
+            and merged[-1].translatable == part.translatable
+            and merged[-1].placeholder == part.placeholder
+        ):
             previous = merged[-1]
             merged[-1] = ContentPart(
-                text=previous.text + part.text,
-                translatable=part.translatable,
+                previous.text + part.text,
+                part.translatable,
+                part.placeholder,
             )
         else:
             merged.append(part)
     return merged
 
 
-def _split_by_code_entities(message: Message) -> list[ContentPart]:
-    text = message.text or ""
-    code_ranges = sorted(
-        (
-            entity.offset,
-            entity.offset + entity.length,
-        )
-        for entity in (message.entities or [])
-        if entity.type in CODE_ENTITY_TYPES
-    )
-
-    if not code_ranges:
-        return []
-
-    merged_ranges: list[tuple[int, int]] = []
-    for start, end in code_ranges:
-        if merged_ranges and start <= merged_ranges[-1][1]:
-            old_start, old_end = merged_ranges[-1]
-            merged_ranges[-1] = old_start, max(old_end, end)
+def _split_by_entities(message: Message, text: str) -> list[ContentPart]:
+    ranges = []
+    for entity in message_entities(message):
+        if entity.type in CODE_ENTITY_TYPES:
+            placeholder = CODE_PLACEHOLDER
+        elif entity.type == MessageEntityType.CUSTOM_EMOJI:
+            placeholder = EMOJI_PLACEHOLDER
         else:
-            merged_ranges.append((start, end))
+            continue
+        ranges.append((entity.offset, entity.offset + entity.length, placeholder))
 
+    if not ranges:
+        return [ContentPart(text, True)]
+
+    ranges.sort(key=lambda item: item[0])
     total_units = len(text.encode("utf-16-le")) // 2
     cursor = 0
     parts: list[ContentPart] = []
-    for start, end in merged_ranges:
+    for start, end, placeholder in ranges:
+        if start < cursor:
+            continue
         parts.append(ContentPart(_utf16_slice(text, cursor, start), True))
-        parts.append(ContentPart(_utf16_slice(text, start, end), False))
+        parts.append(ContentPart(_utf16_slice(text, start, end), False, placeholder))
         cursor = end
     parts.append(ContentPart(_utf16_slice(text, cursor, total_units), True))
     return _merge_parts(parts)
 
 
 def looks_like_code(text: str) -> bool:
-    """Находит цельные блоки кода по консервативным признакам."""
     stripped = text.strip()
-
     if stripped.startswith("```") and stripped.endswith("```"):
         return True
-
     if CODE_LINE_PATTERN.search(text):
         return True
-
     lines = [line for line in text.splitlines() if line.strip()]
-    indented_lines = sum(
-        line.startswith(("    ", "\t"))
-        for line in lines
-    )
-    technical_characters = sum(
-        text.count(character)
-        for character in "{}[]();=<>"
-    )
-
+    indented_lines = sum(line.startswith(("    ", "\t")) for line in lines)
+    technical_characters = sum(text.count(char) for char in "{}[]();=<>")
     return (
         len(lines) >= 2
         and indented_lines >= 1
@@ -167,46 +175,54 @@ def looks_like_code(text: str) -> bool:
     ) or technical_characters >= 12
 
 
+def _split_emojis(part: ContentPart) -> list[ContentPart]:
+    if not part.translatable:
+        return [part]
+    result: list[ContentPart] = []
+    cursor = 0
+    for match in EMOJI_PATTERN.finditer(part.text):
+        result.append(ContentPart(part.text[cursor:match.start()], True))
+        result.append(ContentPart(match.group(), False, EMOJI_PLACEHOLDER))
+        cursor = match.end()
+    result.append(ContentPart(part.text[cursor:], True))
+    return result
+
+
 def split_content(message: Message) -> list[ContentPart]:
-    """Разделяет сообщение на переводимый текст и неизменяемый код."""
-    text = message.text or ""
+    text = message_text(message)
     if not text:
         return []
-
     if is_standalone_link(message):
         return [ContentPart(text, False)]
-
-    entity_parts = _split_by_code_entities(message)
-    if entity_parts:
-        return entity_parts
-
     if is_json(text):
         return [ContentPart(text, False)]
 
+    entity_parts = _split_by_entities(message, text)
     parts: list[ContentPart] = []
-    inside_fence = False
-    for line in text.splitlines(keepends=True):
-        stripped = line.strip()
-        if stripped.startswith("```"):
-            inside_fence = not inside_fence
-            parts.append(ContentPart(line, False))
+    for entity_part in entity_parts:
+        if not entity_part.translatable:
+            parts.append(entity_part)
             continue
+        inside_fence = False
+        for line in entity_part.text.splitlines(keepends=True):
+            if line.strip().startswith("```"):
+                inside_fence = not inside_fence
+                parts.append(ContentPart(line, False, CODE_PLACEHOLDER))
+            else:
+                line_part = ContentPart(
+                    line,
+                    not inside_fence and not looks_like_code(line),
+                    CODE_PLACEHOLDER if inside_fence or looks_like_code(line) else None,
+                )
+                parts.extend(_split_emojis(line_part))
 
-        parts.append(
-            ContentPart(
-                text=line,
-                translatable=(
-                    not inside_fence
-                    and not looks_like_code(line)
-                ),
-            )
-        )
-
+    marker = media_placeholder(message)
+    if marker:
+        parts.insert(0, ContentPart(marker + "\n", False, marker))
     return _merge_parts(parts)
 
 
 def should_translate(message: Message) -> bool:
-    """Проверяет, есть ли в сообщении хотя бы один обычный текстовый фрагмент."""
     return any(
         part.translatable and part.text.strip()
         for part in split_content(message)
