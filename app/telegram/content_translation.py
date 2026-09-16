@@ -1,3 +1,5 @@
+import re
+
 from aiogram.types import Message
 
 from app.languages import TARGET_LANGUAGES
@@ -50,7 +52,11 @@ async def translate_message_content(
                 )
             continue
 
-        text_to_translate = part.text.strip()
+        text_to_translate = re.sub(
+            r"[ \t]{2,}",
+            " ",
+            part.text.strip(),
+        )
         translated_part = await translator_service.translate(text_to_translate)
 
         for language in translations:

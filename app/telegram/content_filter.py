@@ -7,7 +7,7 @@ from aiogram.types import Message
 
 
 CODE_PLACEHOLDER = "[CODE]"
-EMOJI_PLACEHOLDER = "[EMOJI]"
+_EMOJI_PART = "__EMOJI_PART__"
 
 CODE_ENTITY_TYPES = {MessageEntityType.CODE, MessageEntityType.PRE}
 LINK_ENTITY_TYPES = {MessageEntityType.URL, MessageEntityType.TEXT_LINK}
@@ -137,7 +137,7 @@ def _split_by_entities(message: Message, text: str) -> list[ContentPart]:
         if entity.type in CODE_ENTITY_TYPES:
             placeholder = CODE_PLACEHOLDER
         elif entity.type == MessageEntityType.CUSTOM_EMOJI:
-            placeholder = EMOJI_PLACEHOLDER
+            placeholder = _EMOJI_PART
         else:
             continue
         ranges.append((entity.offset, entity.offset + entity.length, placeholder))
@@ -175,17 +175,48 @@ def looks_like_code(text: str) -> bool:
     ) or technical_characters >= 12
 
 
-def _split_emojis(part: ContentPart) -> list[ContentPart]:
+def _expand_emojis(part: ContentPart) -> list[ContentPart]:
     if not part.translatable:
         return [part]
     result: list[ContentPart] = []
     cursor = 0
     for match in EMOJI_PATTERN.finditer(part.text):
         result.append(ContentPart(part.text[cursor:match.start()], True))
-        result.append(ContentPart(match.group(), False, EMOJI_PLACEHOLDER))
+        result.append(ContentPart(match.group(), False, _EMOJI_PART))
         cursor = match.end()
     result.append(ContentPart(part.text[cursor:], True))
     return result
+
+
+def _process_emojis(parts: list[ContentPart]) -> list[ContentPart]:
+    """Удаляет внутренние emoji и сохраняет emoji на границах сообщения."""
+    expanded: list[ContentPart] = []
+    for part in parts:
+        expanded.extend(_expand_emojis(part))
+
+    result: list[ContentPart] = []
+    for index, part in enumerate(expanded):
+        if part.placeholder != _EMOJI_PART:
+            result.append(part)
+            continue
+
+        has_content_before = any(
+            candidate.translatable
+            and candidate.text.strip()
+            for candidate in expanded[:index]
+        )
+        has_content_after = any(
+            candidate.translatable
+            and candidate.text.strip()
+            for candidate in expanded[index + 1:]
+        )
+
+        if not has_content_before or not has_content_after:
+            result.append(
+                ContentPart(part.text, False, part.text)
+            )
+
+    return _merge_parts(result)
 
 
 def split_content(message: Message) -> list[ContentPart]:
@@ -214,12 +245,12 @@ def split_content(message: Message) -> list[ContentPart]:
                     not inside_fence and not looks_like_code(line),
                     CODE_PLACEHOLDER if inside_fence or looks_like_code(line) else None,
                 )
-                parts.extend(_split_emojis(line_part))
+                parts.append(line_part)
 
     marker = media_placeholder(message)
     if marker:
         parts.insert(0, ContentPart(marker + "\n", False, marker))
-    return _merge_parts(parts)
+    return _process_emojis(_merge_parts(parts))
 
 
 def should_translate(message: Message) -> bool:
