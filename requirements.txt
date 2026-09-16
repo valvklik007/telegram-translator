@@ -1,0 +1,4 @@
+aiogram>=3.31,<4
+googletrans==4.0.2
+aiosqlite>=0.20,<1
+python-dotenv>=1.0,<2
